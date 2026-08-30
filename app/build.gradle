@@ -1,0 +1,27 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'top.qwassd.coloros.screenrecorder.unlock'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'top.qwassd.coloros.screenrecorder.unlock'
+        minSdk 27
+        targetSdk 36
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Provided by LSPosed at runtime; never package the API into the module APK.
+    compileOnly 'io.github.libxposed:api:102.0.0'
+}
+

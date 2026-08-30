@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">ColorOS Screen Recorder Unlock</string>
+    <string name="module_description">Keep the ColorOS 16 system recorder alive through lock screen and AOD, scoped only to com.oplus.screenrecorder.</string>
+</resources>
+

@@ -1,0 +1,8 @@
+.gradle/
+local.properties
+**/build/
+analysis/*
+!analysis/REPORT.md
+dist/
+*.log
+
