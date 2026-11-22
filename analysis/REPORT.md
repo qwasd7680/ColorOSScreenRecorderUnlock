@@ -168,11 +168,51 @@ SurfaceFlinger/HWC/Display HAL native Hook 才能获得基本 AOD 画面。原�
 
 | 进程 | 类/方法 | 行为 |
 |---|---|---|
-| screenrecorder | `monitor.l.c(String)` | 忽略 `SCREEN_OFF` 触发的 stop event |
-| screenrecorder | `z4.h.F(boolean, boolean)` | 忽略 screen-off pause，screen-on/其他路径保留 |
+| screenrecorder | `monitor.l.c(String)`（含 `registerReceiver` 回退） | 忽略 `SCREEN_OFF` 触发的 stop event |
+| screenrecorder | `k6.g.F(boolean, boolean)` / `z4.h.F(boolean, boolean)`（含 `OplusPowerManager.registerScreenStatusListener` → `onScreenOff()` 回退） | 忽略 screen-off pause，screen-on/其他路径保留 |
 | system_server | `MediaProjectionStopController.isExemptFromStopping` | 只对目标 owner 返回 true |
 | system_server | `MediaProjectionStopController.isStartForbidden` | 只对目标 owner 返回 false |
 | system_server | `MediaProjectionManagerService.start/stopProjectionLocked` | 目标 grant 生命周期日志/状态 |
 | system_server | `VirtualDisplayDevice.requestDisplayStateLocked` | 只保持目标名/owner 的 VD 为 ON |
 | system_server | `ContentRecorder.updateRecording` | 只绕过目标 owner 的纯 STATE_OFF pause |
+
+---
+
+# PKG110 ColorOS 17 适配增量分析
+
+## 目标环境
+
+| 项目 | 值 |
+|---|---|
+| 设备 | OnePlus PKG110 (`OP5D2BL1`) |
+| ROM | `PKG110_17.0.0.105(CN01)` |
+| Android | 17 / API 37 |
+| 录屏包 | `com.oplus.screenrecorder` |
+| 录屏版本 | 17.4.18 / `170004018` |
+
+分析输入的 SHA-256（原文件不进入公开仓库）：
+
+| 文件 | SHA-256 |
+|---|---|
+| `/product/priv-app/OplusScreenRecorder/OplusScreenRecorder.apk` | `0F385B1B454EE9A544671F819816D12312A11D2EDCCA793103E737FB035FF856` |
+| `/system/framework/services.jar` | `800DA01F1764AC78B376F2C63D9D80B33848DD31F346B99F6A5EC5A276DF1A22` |
+| `/system/framework/oplus-services.jar` | `94575042F64C8C83FD399A8315540812018BD9708B68DA4984CC37AC75C941A4` |
+
+## 失效原因与变更点
+
+1. **录屏 App R8 混淆类名变更（直接失效根因）**：
+   - `com.oplus.screenrecorder` 从 `16.7.2` 升级到 `17.4.18` 后，负责“熄屏暂停”的 `RecordPresenter` 类从 `z4.h` 重命名为 `k6.g`。
+   - 原模块仅尝试 Hook `z4.h.F(boolean, boolean)`，在 ColorOS 17 上找不到类后 fail-open；当系统设置 `recording_settings_enable_screen_off_pause == 1` 时，熄屏触发 `monitor.h.onScreenOff()` → `POWER_OFF` → `k6.g.p()` → `k6.g.F(false, isRecording)` → `pause()` 并调度超时停止任务。
+   - 熄屏停止路径 `com.oplus.screenrecorder.floatwindow.monitor.l.c(String)` 在 `17.4.18` 中保持不变，消费者由 `b5.d0` 变为 `m6.d0`，VirtualDisplay 创建仍使用名称 `OPLUSScreenRecording`（位于 `z5.u.b`）。
+2. **`system_server` 6 个 Hook 签名与逻辑核对**：
+   - `MediaProjectionStopController.isExemptFromStopping(MediaProjection, int)`、`isStartForbidden(MediaProjection)` 及 `MediaProjection.packageName` 均保持不变。
+   - `MediaProjectionManagerService.startProjectionLocked(MediaProjection)`、`stopProjectionLocked(MediaProjection, int)` 均保持不变，且 Oplus 仍将 `com.oplus.screenrecorder` 放入 `mOplusProjectionGrant`。
+   - `VirtualDisplayAdapter$VirtualDisplayDevice.requestDisplayStateLocked(int, float, float, DisplayOffloadSessionImpl)` 及 `mOwnerPackageName`、`mName` 字段保持不变。
+   - `ContentRecorder.updateRecording()`、`mContentRecordingSession`、`mRecordedSurface`、`mDisplayContent` 及 `DisplayInfo.ownerPackageName/state` 保持不变。
+
+## 适配方案与实测结果
+
+- 录屏暂停路径同时支持 `k6.g`（ColorOS 17）与 `z4.h`（ColorOS 16），并在 Hook 前通过字段/方法结构指纹（`JobScheduler`、`JobInfo`、`RecorderService`、`pause()`、`stop()` 及精确签名 `F(boolean, boolean) -> void`）校验，避免混淆冲突误 Hook。
+- 为后续版本更新增加自动回退：若精确类均未匹配，则在 `com.oplus.screenrecorder` 进程内分别通过 `OplusPowerManager.registerScreenStatusListener` 拦截监听器的 `onScreenOff()`，以及通过 `ContextWrapper.registerReceiver` 拦截同时监听 `SCREEN_OFF` 与 `ACTION_SHUTDOWN` 的广播接收器中的 `SCREEN_OFF`。
+- `gradlew assembleDebug` 编译、APK 安装与 ColorOS 17 实机录屏测试均已验证通过。
 

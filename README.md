@@ -1,21 +1,20 @@
 # ColorOSScreenRecorderUnlock
 
-一个针对 ColorOS 16 系统录屏的窄作用域 LSPosed 模块：按电源键进入锁屏/AOD 后，
+一个针对 ColorOS 16 / 17 系统录屏的窄作用域 LSPosed 模块：按电源键进入锁屏/AOD 后，
 保持 `com.oplus.screenrecorder` 的录制、VirtualDisplay 和 WindowManager mirror 活跃。
 
 已适配并实机验证：
 
 - OnePlus PKG110
-- ColorOS `PKG110_16.0.9.400(CN01)`
-- Android 16 / API 36
-- `com.oplus.screenrecorder` 16.7.2 (`160007002`)
+- ColorOS 16：`PKG110_16.0.9.400(CN01)`，Android 16 / API 36，`com.oplus.screenrecorder` 16.7.2 (`160007002`)
+- ColorOS 17：`PKG110_17.0.0.105(CN01)`，Android 17 / API 37，`com.oplus.screenrecorder` 17.4.18 (`170004018`)
 - LSPosed modern API 102
 
 ## 实现范围
 
-- 拦截录屏 App 自己的 `SCREEN_OFF → stop_record` 路径。
-- 拦截录屏 App 自己的“熄屏暂停”路径，保留用户主动暂停/继续/停止。
-- 仅为 `com.oplus.screenrecorder` 豁免 Android 16 Keyguard MediaProjection stop/start 限制。
+- 拦截录屏 App 自己的 `SCREEN_OFF → stop_record` 路径（优先精确匹配带指纹校验的 `monitor.l.c(String)`，混淆改名时自动回退到 `SCREEN_OFF + ACTION_SHUTDOWN` 广播接收器拦截）。
+- 拦截录屏 App 自己的“熄屏暂停”路径（优先精确匹配带结构指纹校验的 `RecordPresenter.F(boolean, boolean)`，支持 ColorOS 16 `z4.h` 与 ColorOS 17 `k6.g`，混淆改名时自动回退到 `OplusPowerManager.registerScreenStatusListener` 监听器的 `onScreenOff()`），保留用户主动暂停/继续/停止。
+- 仅为 `com.oplus.screenrecorder` 豁免 Android 16 / 17 Keyguard MediaProjection stop/start 限制。
 - 仅保持该包创建、名称为 `OPLUSScreenRecording` 的 VirtualDisplay 为 ON。
 - 仅对 owner 为该包且暂停原因仅为 `DISPLAY_STATE_OFF` 的 `ContentRecorder` 保留 mirror。
 - 所有 Hook 独立保护、找不到类或方法时 fail-open，不阻断系统原逻辑。

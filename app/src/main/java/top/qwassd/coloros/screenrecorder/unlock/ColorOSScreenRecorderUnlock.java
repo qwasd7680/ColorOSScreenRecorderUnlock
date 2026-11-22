@@ -1,9 +1,19 @@
 package top.qwassd.coloros.screenrecorder.unlock;
 
+import android.app.job.JobInfo;
+import android.app.job.JobScheduler;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.ContextWrapper;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.util.Log;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedInterface;
@@ -11,8 +21,11 @@ import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 /**
- * Hooks verified on PKG110_16.0.9.400(CN01), Android 16/API 36 and
- * com.oplus.screenrecorder 16.7.2 (160007002).
+ * Narrow-scope LSPosed module keeping com.oplus.screenrecorder active across lock screen / AOD.
+ *
+ * Verified on:
+ * - PKG110_16.0.9.400(CN01), Android 16/API 36, com.oplus.screenrecorder 16.7.2 (160007002)
+ * - PKG110_17.0.0.105(CN01), Android 17/API 37, com.oplus.screenrecorder 17.4.18 (170004018)
  *
  * Every hook fails open: a missing class/member preserves stock behaviour instead of risking
  * system_server stability. No generic MediaProjection.stop(), VirtualDisplay.release(),
@@ -23,6 +36,14 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
     private static final String TARGET = "com.oplus.screenrecorder";
     private static final String RECORDER_VIRTUAL_DISPLAY = "OPLUSScreenRecording";
     private static final String ACTION_SCREEN_OFF = "android.intent.action.SCREEN_OFF";
+    private static final String ACTION_SHUTDOWN = "android.intent.action.ACTION_SHUTDOWN";
+    private static final String RECORDER_SERVICE_CLASS = "com.oplus.screenrecorder.RecorderService";
+    private static final String SCREEN_OFF_MONITOR_CLASS =
+            "com.oplus.screenrecorder.floatwindow.monitor.l";
+    private static final String[] PAUSE_HANDLER_CANDIDATES = {
+            "k6.g", // ColorOS 17 (com.oplus.screenrecorder 17.4.18)
+            "z4.h", // ColorOS 16 (com.oplus.screenrecorder 16.7.2)
+    };
 
     private final AtomicBoolean recorderHooksInstalled = new AtomicBoolean(false);
     private final AtomicBoolean systemHooksInstalled = new AtomicBoolean(false);
@@ -32,6 +53,8 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
     private final AtomicBoolean keyguardLogged = new AtomicBoolean(false);
     private final AtomicBoolean virtualDisplayLogged = new AtomicBoolean(false);
     private final AtomicBoolean contentRecorderLogged = new AtomicBoolean(false);
+    private final Set<Class<?>> hookedReceiverClasses = ConcurrentHashMap.newKeySet();
+    private final Set<Class<?>> hookedScreenListenerClasses = ConcurrentHashMap.newKeySet();
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
@@ -57,17 +80,113 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
         }
         int count = 0;
 
-        // Verified path when "screen-off pause" is disabled:
-        // monitor.l.c(SCREEN_OFF) -> SCREEN_OFF_OR_SHUT_DOWN -> b5.d0.s -> action 128 (stop_record).
-        count += installMethod(loader,
-                "com.oplus.screenrecorder.floatwindow.monitor.l", "c", 1,
-                new ScreenOffStopHooker());
+        // 1) "screen-off pause" disabled:
+        //    monitor.l.c(SCREEN_OFF) -> SCREEN_OFF_OR_SHUT_DOWN -> stop_record (action 128).
+        int stopHooks = installVerifiedScreenOffStopHook(loader);
+        if (stopHooks == 0) {
+            stopHooks = installScreenOffReceiverFallbackHook();
+        }
+        count += stopHooks;
 
-        // Verified path when "screen-off pause" is enabled:
-        // monitor.h.onScreenOff -> POWER_OFF -> z4.h.F(false, isRecording) -> pause().
-        count += installMethod(loader, "z4.h", "F", 2, new ScreenOffPauseHooker());
+        // 2) "screen-off pause" enabled:
+        //    monitor.h.onScreenOff -> POWER_OFF -> RecordPresenter.F(false, isRecording) -> pause().
+        int pauseHooks = installVerifiedScreenOffPauseHook(loader);
+        if (pauseHooks == 0) {
+            pauseHooks = installPowerOffListenerFallbackHook(loader);
+        }
+        count += pauseHooks;
 
         report("[Recorder] installed hooks=" + count + " target=" + TARGET);
+    }
+
+    private int installVerifiedScreenOffStopHook(ClassLoader loader) {
+        try {
+            Class<?> type = Class.forName(SCREEN_OFF_MONITOR_CLASS, false, loader);
+            if (!hasFieldOfType(type, Context.class)
+                    || !hasFieldOfType(type, BroadcastReceiver.class)) {
+                report("[Recorder] skip " + SCREEN_OFF_MONITOR_CLASS + ": fingerprint mismatch");
+                return 0;
+            }
+            return installMethodWithSignature(type, "c", new Class<?>[]{String.class},
+                    void.class, new ScreenOffStopHooker());
+        } catch (Throwable error) {
+            report("skip " + SCREEN_OFF_MONITOR_CLASS + ".c: "
+                    + error.getClass().getSimpleName() + " " + safeMessage(error));
+            return 0;
+        }
+    }
+
+    private int installScreenOffReceiverFallbackHook() {
+        int count = 0;
+        for (Method method : ContextWrapper.class.getDeclaredMethods()) {
+            if (!"registerReceiver".equals(method.getName())) {
+                continue;
+            }
+            Class<?>[] params = method.getParameterTypes();
+            if (params.length < 2
+                    || params[0] != BroadcastReceiver.class
+                    || params[1] != IntentFilter.class) {
+                continue;
+            }
+            try {
+                hook(method)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(new RegisterScreenOffReceiverFallbackHooker());
+                count++;
+            } catch (Throwable error) {
+                report("[Recorder] skip registerReceiver fallback: "
+                        + error.getClass().getSimpleName() + " " + safeMessage(error));
+            }
+        }
+        report("[Recorder] installed screen-off receiver fallback hooks=" + count);
+        return count;
+    }
+
+    private int installVerifiedScreenOffPauseHook(ClassLoader loader) {
+        for (String candidate : PAUSE_HANDLER_CANDIDATES) {
+            try {
+                Class<?> type = Class.forName(candidate, false, loader);
+                if (!isRecordPresenterClass(type)) {
+                    report("[Recorder] skip " + candidate + ": presenter fingerprint mismatch");
+                    continue;
+                }
+                int installed = installMethodWithSignature(type, "F",
+                        new Class<?>[]{boolean.class, boolean.class}, void.class,
+                        new ScreenOffPauseHooker());
+                if (installed > 0) {
+                    return installed;
+                }
+            } catch (ClassNotFoundException ignored) {
+                report("skip " + candidate + ".F: ClassNotFoundException");
+            } catch (Throwable error) {
+                report("skip " + candidate + ".F: "
+                        + error.getClass().getSimpleName() + " " + safeMessage(error));
+            }
+        }
+        return 0;
+    }
+
+    private int installPowerOffListenerFallbackHook(ClassLoader loader) {
+        try {
+            Class<?> powerManagerClass = Class.forName("android.os.OplusPowerManager", false, loader);
+            int count = 0;
+            for (Method method : powerManagerClass.getDeclaredMethods()) {
+                if (!"registerScreenStatusListener".equals(method.getName())
+                        || method.getParameterTypes().length != 1) {
+                    continue;
+                }
+                hook(method)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(new RegisterScreenStatusFallbackHooker());
+                count++;
+            }
+            report("[Recorder] installed power-off listener fallback hooks=" + count);
+            return count;
+        } catch (Throwable error) {
+            report("[Recorder] skip power-off listener fallback: "
+                    + error.getClass().getSimpleName() + " " + safeMessage(error));
+            return 0;
+        }
     }
 
     private void installSystemServerHooks(ClassLoader loader) {
@@ -76,8 +195,8 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
         }
         int count = 0;
 
-        // Android 16 keyguard policy on this ROM. These two methods are the actual policy gates;
-        // there is no canCaptureKeyguard() method in this services.jar.
+        // Android 16/17 keyguard policy on this ROM. These two methods are the actual policy gates;
+        // there is no canCaptureKeyguard() method in services.jar.
         count += installMethod(loader,
                 "com.android.server.media.projection.MediaProjectionStopController",
                 "isExemptFromStopping", 2, new KeyguardExemptionHooker(true));
@@ -99,7 +218,7 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
                 "com.android.server.display.VirtualDisplayAdapter$VirtualDisplayDevice",
                 "requestDisplayStateLocked", 4, new VirtualDisplayPowerHooker());
 
-        // Android 16 ContentRecorder.updateRecording() removes its mirror when the consuming
+        // Android 16/17 ContentRecorder.updateRecording() removes its mirror when the consuming
         // display is STATE_OFF. Bypass only that exact branch and only when DisplayInfo says the
         // consuming virtual display owner is com.oplus.screenrecorder.
         count += installMethod(loader, "com.android.server.wm.ContentRecorder",
@@ -138,6 +257,66 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
         }
     }
 
+    private int installMethodWithSignature(Class<?> type, String methodName,
+                                           Class<?>[] parameterTypes, Class<?> returnType,
+                                           XposedInterface.Hooker hooker) {
+        int count = 0;
+        for (Method method : type.getDeclaredMethods()) {
+            if (!methodName.equals(method.getName())
+                    || !Arrays.equals(method.getParameterTypes(), parameterTypes)
+                    || (returnType != null && method.getReturnType() != returnType)) {
+                continue;
+            }
+            try {
+                method.setAccessible(true);
+            } catch (Throwable ignored) {
+            }
+            hook(method)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(hooker);
+            count++;
+        }
+        report("hook " + type.getName() + "." + methodName + "/" + parameterTypes.length
+                + " count=" + count);
+        return count;
+    }
+
+    private static boolean isRecordPresenterClass(Class<?> type) {
+        return hasFieldOfType(type, JobScheduler.class)
+                && hasFieldOfType(type, JobInfo.class)
+                && hasFieldOfTypeName(type, RECORDER_SERVICE_CLASS)
+                && hasDeclaredMethod(type, "pause", 0)
+                && hasDeclaredMethod(type, "stop", 0);
+    }
+
+    private static boolean hasFieldOfType(Class<?> type, Class<?> fieldType) {
+        for (Field field : type.getDeclaredFields()) {
+            if (field.getType() == fieldType) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasFieldOfTypeName(Class<?> type, String typeName) {
+        for (Field field : type.getDeclaredFields()) {
+            if (typeName.equals(field.getType().getName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasDeclaredMethod(Class<?> type, String name, int parameterCount) {
+        for (Method method : type.getDeclaredMethods()) {
+            if (name.equals(method.getName())
+                    && method.getParameterTypes().length == parameterCount) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private final class ScreenOffStopHooker implements XposedInterface.Hooker {
         @Override
         public Object intercept(XposedInterface.Chain chain) throws Throwable {
@@ -151,6 +330,52 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
                 }
             } catch (Throwable error) {
                 report("[Recorder] stop hook fail-open: " + error.getClass().getSimpleName());
+            }
+            return chain.proceed();
+        }
+    }
+
+    private final class RegisterScreenOffReceiverFallbackHooker implements XposedInterface.Hooker {
+        @Override
+        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            try {
+                Object receiver = chain.getArg(0);
+                Object filter = chain.getArg(1);
+                if (receiver instanceof BroadcastReceiver && filter instanceof IntentFilter) {
+                    IntentFilter intentFilter = (IntentFilter) filter;
+                    if (intentFilter.hasAction(ACTION_SCREEN_OFF)
+                            && intentFilter.hasAction(ACTION_SHUTDOWN)) {
+                        Class<?> receiverClass = receiver.getClass();
+                        if (hookedReceiverClasses.add(receiverClass)) {
+                            installMethodWithSignature(receiverClass, "onReceive",
+                                    new Class<?>[]{Context.class, Intent.class}, void.class,
+                                    new ScreenOffReceiverFallbackHooker());
+                        }
+                    }
+                }
+            } catch (Throwable error) {
+                report("[Recorder] registerReceiver fallback fail-open: "
+                        + error.getClass().getSimpleName());
+            }
+            return chain.proceed();
+        }
+    }
+
+    private final class ScreenOffReceiverFallbackHooker implements XposedInterface.Hooker {
+        @Override
+        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            try {
+                Object intentObj = chain.getArg(1);
+                if (intentObj instanceof Intent
+                        && ACTION_SCREEN_OFF.equals(((Intent) intentObj).getAction())) {
+                    if (recorderStopLogged.compareAndSet(false, true)) {
+                        report("[Recorder] intercepted screen-off stop broadcast (fallback)");
+                    }
+                    return null;
+                }
+            } catch (Throwable error) {
+                report("[Recorder] stop broadcast fallback fail-open: "
+                        + error.getClass().getSimpleName());
             }
             return chain.proceed();
         }
@@ -171,6 +396,38 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
                 report("[Recorder] pause hook fail-open: " + error.getClass().getSimpleName());
             }
             return chain.proceed();
+        }
+    }
+
+    private final class RegisterScreenStatusFallbackHooker implements XposedInterface.Hooker {
+        @Override
+        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            try {
+                Object listener = chain.getArg(0);
+                if (listener != null) {
+                    Class<?> listenerClass = listener.getClass();
+                    if (listenerClass.getName().startsWith(TARGET + ".")
+                            && hookedScreenListenerClasses.add(listenerClass)) {
+                        installMethodWithSignature(listenerClass, "onScreenOff",
+                                new Class<?>[0], void.class,
+                                new ScreenOffListenerFallbackHooker());
+                    }
+                }
+            } catch (Throwable error) {
+                report("[Recorder] registerScreenStatus fallback fail-open: "
+                        + error.getClass().getSimpleName());
+            }
+            return chain.proceed();
+        }
+    }
+
+    private final class ScreenOffListenerFallbackHooker implements XposedInterface.Hooker {
+        @Override
+        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            if (recorderPauseLogged.compareAndSet(false, true)) {
+                report("[Recorder] intercepted screen-off listener (fallback)");
+            }
+            return null;
         }
     }
 
@@ -373,4 +630,3 @@ public final class ColorOSScreenRecorderUnlock extends XposedModule {
         return message == null ? "" : message;
     }
 }
-
