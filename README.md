@@ -43,6 +43,8 @@ ColorOSScreenRecorderUnlock
 
 ## 构建
 
+### Debug 构建
+
 Windows：
 
 ```powershell
@@ -55,7 +57,32 @@ Linux/macOS：
 ./gradlew assembleDebug
 ```
 
-输出：`app/build/outputs/apk/debug/app-debug.apk`
+输出：`app/build/outputs/apk/debug/ColorOSScreenRecorderUnlock-v<versionName>-debug.apk`
+
+### Release 签名构建
+
+1. 参考 [keystore.properties.example](keystore.properties.example) 创建本地 `keystore.properties`（已被 `.gitignore` 忽略），并指定签名证书 `keystore/release.jks` 及密码/别名；或通过环境变量 `SIGNING_STORE_FILE`、`SIGNING_STORE_PASSWORD`、`SIGNING_KEY_ALIAS`、`SIGNING_KEY_PASSWORD` 传入。
+2. 执行：
+
+```powershell
+.\gradlew.bat assembleRelease
+```
+
+输出：`app/build/outputs/apk/release/ColorOSScreenRecorderUnlock-v<versionName>-release.apk`
+
+### GitHub Actions 自动打包并发布 Release
+
+仓库已配置 [.github/workflows/release.yml](.github/workflows/release.yml)。在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 中添加以下 4 个 Secrets：
+
+- `SIGNING_KEYSTORE_BASE64`：`keystore/release.jks` 的 Base64 编码字符串
+- `SIGNING_STORE_PASSWORD`：keystore 密码
+- `SIGNING_KEY_ALIAS`：证书别名
+- `SIGNING_KEY_PASSWORD`：密钥密码
+
+触发方式：
+
+- 推送 `v*` 标签（例如 `git tag v1.1.0 && git push origin v1.1.0`），自动编译签名 APK、校验签名、生成 `SHA256SUMS.txt` 并创建 GitHub Release；
+- 或在 GitHub Actions 页面手动运行 **Release APK** workflow（`workflow_dispatch`）。
 
 构建环境使用 JDK 17、Android Gradle Plugin 8.12.3、compileSdk 36。
 

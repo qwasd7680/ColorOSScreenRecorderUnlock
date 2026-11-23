@@ -5,4 +5,10 @@ analysis/*
 !analysis/REPORT.md
 dist/
 *.log
+keystore/
+*.jks
+*.keystore
+*.p12
+keystore.properties
+
 

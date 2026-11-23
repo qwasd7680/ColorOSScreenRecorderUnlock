@@ -2,6 +2,34 @@ plugins {
     id 'com.android.application'
 }
 
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.isFile()) {
+    keystorePropertiesFile.withInputStream { stream ->
+        keystoreProperties.load(stream)
+    }
+}
+
+def resolveSigningValue = { String envKey, String propKey ->
+    def envVal = System.getenv(envKey)
+    if (envVal != null && !envVal.trim().isEmpty()) {
+        return envVal.trim()
+    }
+    def propVal = keystoreProperties.getProperty(propKey)
+    return propVal != null ? propVal.trim() : null
+}
+
+def signingStoreFilePath = resolveSigningValue('SIGNING_STORE_FILE', 'storeFile')
+def signingStorePassword = resolveSigningValue('SIGNING_STORE_PASSWORD', 'storePassword')
+def signingKeyAlias = resolveSigningValue('SIGNING_KEY_ALIAS', 'keyAlias')
+def signingKeyPassword = resolveSigningValue('SIGNING_KEY_PASSWORD', 'keyPassword')
+def signingStoreFileObj = signingStoreFilePath ? rootProject.file(signingStoreFilePath) : null
+def hasReleaseSigning = signingStoreFileObj != null &&
+        signingStoreFileObj.isFile() &&
+        signingStorePassword &&
+        signingKeyAlias &&
+        signingKeyPassword
+
 android {
     namespace 'top.qwassd.coloros.screenrecorder.unlock'
     compileSdk 36
@@ -14,14 +42,47 @@ android {
         versionName '1.1.0'
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile signingStoreFileObj
+                storePassword signingStorePassword
+                keyAlias signingKeyAlias
+                keyPassword signingKeyPassword
+                enableV1Signing true
+                enableV2Signing true
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    dependenciesInfo {
+        includeInApk false
+        includeInBundle false
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
 }
 
+base {
+    archivesName = "ColorOSScreenRecorderUnlock-v${android.defaultConfig.versionName}"
+}
+
 dependencies {
     // Provided by LSPosed at runtime; never package the API into the module APK.
     compileOnly 'io.github.libxposed:api:102.0.0'
 }
+
 
